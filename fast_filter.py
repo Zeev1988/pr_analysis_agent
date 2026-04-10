@@ -40,13 +40,14 @@ def classify_file(filename: str, content: str) -> str:
     if ext in SAFE_EXTENSIONS:
         return "SAFE"
 
-    if ext in RISKY_EXTENSIONS:
-        return "RISKY"
-
-    # Unknown extension – fall back to content scanning.
-    for pattern in RISKY_CONTENT_PATTERNS:
-        if pattern in content:
-            return "RISKY"
+    # For both risky-extension and unknown-extension files, require at least
+    # one suspicious content pattern before paying for the AST step.
+    # Pure utility files (.py, .js, etc.) with no dangerous patterns are discarded here.
+    if ext in RISKY_EXTENSIONS or ext == "":
+        for pattern in RISKY_CONTENT_PATTERNS:
+            if pattern in content:
+                return "RISKY"
+        return "SAFE"
 
     return "SAFE"
 
