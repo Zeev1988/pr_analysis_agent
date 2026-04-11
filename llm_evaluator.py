@@ -36,28 +36,12 @@ from tenacity import (
 )
 
 from ast_extractor import FunctionSlice, slice_context
-
+from langfuse import langfuse_context, observe
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 _DEFAULT_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
-
-
-# ---------------------------------------------------------------------------
-# Langfuse observability — optional, gracefully degrades if not installed
-# or if LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set.
-# ---------------------------------------------------------------------------
-
-try:
-    from langfuse.decorators import langfuse_context, observe
-except ImportError:
-    langfuse_context = None  # type: ignore[assignment]
-
-    def observe(**_kw):  # type: ignore[misc]
-        def _dec(fn): return fn
-        return _dec
-
 
 # ---------------------------------------------------------------------------
 # Response schema
