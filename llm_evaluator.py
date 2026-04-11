@@ -14,7 +14,7 @@ Configuration (via .env or environment variables):
     OPENAI_API_KEY    – required for OpenAI models.
     ANTHROPIC_API_KEY – required for Anthropic models.
     GOOGLE_API_KEY    – required for Gemini models.
-    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY – optional; enables tracing.
+    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY – required for Langfuse tracing.
 """
 
 from __future__ import annotations
@@ -40,22 +40,13 @@ from ast_extractor import FunctionSlice, slice_context
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Langfuse observability — optional, gracefully degrades if not installed
-# or if LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set.
-# v3 API: observe, get_client, and update_current_observation imported from
-# root langfuse package.
+# Langfuse observability (v3)
 # ---------------------------------------------------------------------------
 
-try:
-    import langfuse
-    from langfuse import observe
-    _langfuse = langfuse.get_client()
-except ImportError:
-    _langfuse = None  # type: ignore[assignment]
+import langfuse
+from langfuse import observe
 
-    def observe(**_kw):  # type: ignore[misc]
-        def _dec(fn): return fn
-        return _dec
+_langfuse = langfuse.get_client()
 
 load_dotenv()
 
