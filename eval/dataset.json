@@ -1,0 +1,386 @@
+[
+  {
+    "id": "sql-001",
+    "description": "Classic SQL injection via f-string interpolation of request arg",
+    "input": {
+      "filename": "database.py",
+      "function_name": "get_user",
+      "params": ["user_id"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def get_user(user_id):\n    user_id = request.args.get('id')\n    query = f'SELECT * FROM users WHERE id = {user_id}'\n    cursor.execute(query)\n    return cursor.fetchone()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "SQL Injection"
+  },
+  {
+    "id": "sql-002",
+    "description": "Parameterised query — safe despite user input and execute sink",
+    "input": {
+      "filename": "database.py",
+      "function_name": "get_user_safe",
+      "params": ["user_id"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def get_user_safe(user_id):\n    user_id = request.args.get('id')\n    cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))\n    return cursor.fetchone()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "sql-003",
+    "description": "SQL injection via string concatenation with form input",
+    "input": {
+      "filename": "views.py",
+      "function_name": "search_products",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def search_products(request):\n    term = request.form.get('q')\n    query = 'SELECT * FROM products WHERE name LIKE \\'' + term + '\\''\n    cursor.execute(query)\n    return cursor.fetchall()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "SQL Injection"
+  },
+  {
+    "id": "cmd-001",
+    "description": "Shell injection via os.system with unsanitised request arg",
+    "input": {
+      "filename": "utils.py",
+      "function_name": "ping_host",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def ping_host(request):\n    host = request.args.get('host')\n    os.system(f'ping -c 1 {host}')\n    return 'done'",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Command Injection"
+  },
+  {
+    "id": "cmd-002",
+    "description": "subprocess with list args and no shell=True — safe",
+    "input": {
+      "filename": "utils.py",
+      "function_name": "run_lint",
+      "params": ["filepath"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def run_lint(filepath):\n    result = subprocess.run(['pylint', filepath], capture_output=True, text=True)\n    return result.stdout",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "cmd-003",
+    "description": "subprocess with shell=True and user-supplied argument",
+    "input": {
+      "filename": "admin.py",
+      "function_name": "run_script",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def run_script(request):\n    name = request.args.get('script')\n    subprocess.run(f'bash scripts/{name}.sh', shell=True)\n    return 'ok'",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Command Injection"
+  },
+  {
+    "id": "path-001",
+    "description": "Path traversal via open() with unsanitised filename from request",
+    "input": {
+      "filename": "files.py",
+      "function_name": "read_file",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def read_file(request):\n    filename = request.args.get('file')\n    with open(f'/var/data/{filename}') as f:\n        return f.read()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Path Traversal"
+  },
+  {
+    "id": "path-002",
+    "description": "File read with basename sanitisation — safe",
+    "input": {
+      "filename": "files.py",
+      "function_name": "read_report",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 6,
+      "raw_source": "def read_report(request):\n    filename = request.args.get('file')\n    safe_name = os.path.basename(filename)\n    with open(os.path.join('/var/reports', safe_name)) as f:\n        return f.read()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "eval-001",
+    "description": "eval() called directly on user input — code injection",
+    "input": {
+      "filename": "calculator.py",
+      "function_name": "calculate",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def calculate(request):\n    expr = request.args.get('expr')\n    result = eval(expr)\n    return str(result)",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Code Injection"
+  },
+  {
+    "id": "eval-002",
+    "description": "eval() on hardcoded string — not user-controlled, safe",
+    "input": {
+      "filename": "config.py",
+      "function_name": "load_defaults",
+      "params": [],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def load_defaults():\n    defaults = eval(\"{'timeout': 30, 'retries': 3}\")\n    return defaults",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "deser-001",
+    "description": "pickle.loads on user-uploaded file bytes — unsafe deserialisation",
+    "input": {
+      "filename": "upload.py",
+      "function_name": "load_model",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def load_model(request):\n    data = request.files['model'].read()\n    model = pickle.loads(data)\n    return model.predict([1, 2, 3])",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Insecure Deserialization"
+  },
+  {
+    "id": "deser-002",
+    "description": "pickle.loads on data read from a trusted local file path",
+    "input": {
+      "filename": "cache.py",
+      "function_name": "load_cache",
+      "params": [],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def load_cache():\n    with open('/var/cache/model.pkl', 'rb') as f:\n        data = f.read()\n    return pickle.loads(data)",
+      "changed_lines": [4],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "safe-001",
+    "description": "Pure arithmetic utility — no user input, no sinks",
+    "input": {
+      "filename": "math_utils.py",
+      "function_name": "compute_discount",
+      "params": ["price", "rate"],
+      "start_line": 1,
+      "end_line": 3,
+      "raw_source": "def compute_discount(price, rate):\n    return price * (1 - rate)",
+      "changed_lines": [2],
+      "has_sink": false
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "safe-002",
+    "description": "String formatting with no user input flowing to a sink",
+    "input": {
+      "filename": "notifications.py",
+      "function_name": "format_message",
+      "params": ["username", "action"],
+      "start_line": 1,
+      "end_line": 3,
+      "raw_source": "def format_message(username, action):\n    return f'User {username} performed {action}'",
+      "changed_lines": [2],
+      "has_sink": false
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "hard-neg-001",
+    "description": "Hard negative: execute sink present but query is fully parameterised with internal data only",
+    "input": {
+      "filename": "reports.py",
+      "function_name": "generate_report",
+      "params": ["report_id"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def generate_report(report_id):\n    report_id = int(report_id)\n    cursor.execute('SELECT * FROM reports WHERE id = %s', (report_id,))\n    return cursor.fetchall()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "hard-neg-002",
+    "description": "Hard negative: open() called but path is constructed from an internal config constant, not user input",
+    "input": {
+      "filename": "logger.py",
+      "function_name": "write_log",
+      "params": ["message"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def write_log(message):\n    log_path = os.path.join(LOG_DIR, 'app.log')\n    with open(log_path, 'a') as f:\n        f.write(message + '\\n')",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "hard-neg-003",
+    "description": "Hard negative: subprocess.run with a list built from a whitelisted set",
+    "input": {
+      "filename": "tools.py",
+      "function_name": "run_tool",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 8,
+      "raw_source": "ALLOWED_TOOLS = {'ls', 'pwd', 'whoami'}\n\ndef run_tool(request):\n    tool = request.args.get('tool')\n    if tool not in ALLOWED_TOOLS:\n        return 'forbidden', 403\n    result = subprocess.run([tool], capture_output=True, text=True)\n    return result.stdout",
+      "changed_lines": [4],
+      "has_sink": true
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "sqli-004",
+    "description": "SQL injection via ORM raw() with unsanitised format arg",
+    "input": {
+      "filename": "api.py",
+      "function_name": "filter_orders",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def filter_orders(request):\n    status = request.args.get('status')\n    orders = Order.objects.raw(f'SELECT * FROM orders WHERE status = \"{status}\"')\n    return list(orders)",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "SQL Injection"
+  },
+  {
+    "id": "xxe-001",
+    "description": "XML parsing with external entity resolution enabled — XXE risk",
+    "input": {
+      "filename": "parser.py",
+      "function_name": "parse_upload",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 6,
+      "raw_source": "def parse_upload(request):\n    xml_data = request.data\n    parser = etree.XMLParser(resolve_entities=True)\n    tree = etree.fromstring(xml_data, parser)\n    return tree.find('name').text",
+      "changed_lines": [3],
+      "has_sink": false
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "XML External Entity (XXE)"
+  },
+  {
+    "id": "open-redirect-001",
+    "description": "Open redirect via unsanitised next parameter",
+    "input": {
+      "filename": "auth.py",
+      "function_name": "login_redirect",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def login_redirect(request):\n    next_url = request.args.get('next', '/')\n    if current_user.is_authenticated:\n        return redirect(next_url)",
+      "changed_lines": [2],
+      "has_sink": false
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Open Redirect"
+  },
+  {
+    "id": "open-redirect-002",
+    "description": "Redirect validated against allowed hosts — safe",
+    "input": {
+      "filename": "auth.py",
+      "function_name": "safe_redirect",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 8,
+      "raw_source": "ALLOWED_HOSTS = {'example.com', 'app.example.com'}\n\ndef safe_redirect(request):\n    next_url = request.args.get('next', '/')\n    parsed = urlparse(next_url)\n    if parsed.netloc and parsed.netloc not in ALLOWED_HOSTS:\n        next_url = '/'\n    return redirect(next_url)",
+      "changed_lines": [4],
+      "has_sink": false
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  },
+  {
+    "id": "import-001",
+    "description": "__import__ with user-supplied module name — arbitrary code load",
+    "input": {
+      "filename": "plugins.py",
+      "function_name": "load_plugin",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 4,
+      "raw_source": "def load_plugin(request):\n    name = request.args.get('plugin')\n    mod = __import__(name)\n    return mod.run()",
+      "changed_lines": [2],
+      "has_sink": true
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Code Injection"
+  },
+  {
+    "id": "mass-assign-001",
+    "description": "Mass assignment: user dict passed directly to model update",
+    "input": {
+      "filename": "users.py",
+      "function_name": "update_profile",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 5,
+      "raw_source": "def update_profile(request):\n    data = request.json\n    User.query.filter_by(id=current_user.id).update(data)\n    db.session.commit()",
+      "changed_lines": [2],
+      "has_sink": false
+    },
+    "expected_verdict": "BLOCK",
+    "expected_vulnerability_type": "Mass Assignment"
+  },
+  {
+    "id": "mass-assign-002",
+    "description": "Update with explicit field allowlist — safe",
+    "input": {
+      "filename": "users.py",
+      "function_name": "update_profile_safe",
+      "params": ["request"],
+      "start_line": 1,
+      "end_line": 7,
+      "raw_source": "def update_profile_safe(request):\n    data = request.json\n    allowed = {k: data[k] for k in ('display_name', 'bio') if k in data}\n    User.query.filter_by(id=current_user.id).update(allowed)\n    db.session.commit()",
+      "changed_lines": [2],
+      "has_sink": false
+    },
+    "expected_verdict": "PASS",
+    "expected_vulnerability_type": null
+  }
+]
