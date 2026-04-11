@@ -36,8 +36,26 @@ from tenacity import (
 )
 
 from ast_extractor import FunctionSlice, slice_context
-from langfuse import langfuse_context, observe
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Langfuse observability — optional, gracefully degrades if not installed
+# or if LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set.
+# v3 API: observe, get_client, and update_current_observation imported from
+# root langfuse package.
+# ---------------------------------------------------------------------------
+
+try:
+    import langfuse
+    from langfuse import observe
+    _langfuse = langfuse.get_client()
+except ImportError:
+    _langfuse = None  # type: ignore[assignment]
+
+    def observe(**_kw):  # type: ignore[misc]
+        def _dec(fn): return fn
+        return _dec
 
 load_dotenv()
 
@@ -177,8 +195,8 @@ def evaluate_slice(
 
     verdict = _call()
 
-    if langfuse_context is not None:
-        langfuse_context.update_current_observation(
+    if _langfuse is not None:
+        langfuse.update_current_observation(
             metadata={
                 "filename": function_slice.filename,
                 "function_name": function_slice.function_name,
