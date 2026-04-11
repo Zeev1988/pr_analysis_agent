@@ -14,7 +14,7 @@ Configuration (via .env or environment variables):
     OPENAI_API_KEY    – required for OpenAI models.
     ANTHROPIC_API_KEY – required for Anthropic models.
     GOOGLE_API_KEY    – required for Gemini models.
-    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY – required for Langfuse tracing.
+    LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY – optional; enables tracing.
 """
 
 from __future__ import annotations
@@ -34,23 +34,15 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
-
+from langfuse import Langfuse, observe
 from ast_extractor import FunctionSlice, slice_context
 
+_lf = Langfuse()
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Langfuse observability (v3)
-# ---------------------------------------------------------------------------
-
-import langfuse
-from langfuse import observe
-
-_langfuse = langfuse.get_client()
-
 load_dotenv()
 
 _DEFAULT_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
+
 
 # ---------------------------------------------------------------------------
 # Response schema
@@ -186,19 +178,18 @@ def evaluate_slice(
 
     verdict = _call()
 
-    if _langfuse is not None:
-        langfuse.update_current_observation(
-            metadata={
-                "filename": function_slice.filename,
-                "function_name": function_slice.function_name,
-                "has_sink": function_slice.has_sink,
-                "changed_lines": function_slice.changed_lines,
-                "model": _model,
-                "verdict": verdict.verdict,
-                "confidence": verdict.confidence,
-                "vulnerability_type": verdict.vulnerability_type,
-            },
-        )
+    _lf.update_current_span(
+        metadata={
+            "filename": function_slice.filename,
+            "function_name": function_slice.function_name,
+            "has_sink": function_slice.has_sink,
+            "changed_lines": function_slice.changed_lines,
+            "model": _model,
+            "verdict": verdict.verdict,
+            "confidence": verdict.confidence,
+            "vulnerability_type": verdict.vulnerability_type,
+        },
+    )
 
     return verdict
 
