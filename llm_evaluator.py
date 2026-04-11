@@ -26,7 +26,6 @@ from typing import Literal
 import instructor
 import litellm
 import openai
-from langfuse.decorators import langfuse_context, observe
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from tenacity import (
@@ -45,9 +44,19 @@ load_dotenv()
 _DEFAULT_MODEL: str = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
 
 
-def observe(**_kw):  # type: ignore[misc]
-    def _dec(fn): return fn
-    return _dec
+# ---------------------------------------------------------------------------
+# Langfuse observability — optional, gracefully degrades if not installed
+# or if LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are not set.
+# ---------------------------------------------------------------------------
+
+try:
+    from langfuse.decorators import langfuse_context, observe
+except ImportError:
+    langfuse_context = None  # type: ignore[assignment]
+
+    def observe(**_kw):  # type: ignore[misc]
+        def _dec(fn): return fn
+        return _dec
 
 
 # ---------------------------------------------------------------------------
