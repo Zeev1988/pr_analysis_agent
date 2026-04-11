@@ -33,7 +33,7 @@ from llm_evaluator import SecurityVerdict, _build_user_message, evaluate_slice
 from eval.metrics import (
     BlockJustificationMetric,
     HallucinationMetric,
-    LabeledThreatCatchMetric,
+    VulnClassificationMetric,
 )
 
 load_dotenv()
@@ -52,7 +52,7 @@ DEFAULT_PRECISION_THRESHOLD = 0.80         # TP / (TP + FP) — are BLOCK calls 
 DEFAULT_RECALL_THRESHOLD = 0.90            # TP / (TP + FN) — stricter: missing vulns is worse
 DEFAULT_HALLUCINATION_THRESHOLD = 0.6      # mean judge score
 DEFAULT_BLOCK_JUSTIFICATION_THRESHOLD = 0.6   # mean judge: are BLOCK calls justified?
-DEFAULT_LABELED_THREAT_CATCH_THRESHOLD = 0.7  # mean judge: when label is BLOCK, did model catch it? (stricter)
+DEFAULT_VULN_CLASSIFICATION_THRESHOLD = 0.7   # mean judge: did model identify the correct vulnerability class?
 
 
 # ---------------------------------------------------------------------------
@@ -64,11 +64,33 @@ class CaseResult:
     case_id: str
     expected_verdict: str
     actual_verdict: str
+    expected_vulnerability_type: str | None  # human label from dataset
     correct: bool
     reasoning: str
-    vulnerability_type: str | None
+    vulnerability_type: str | None           # model's predicted type
     confidence: float
     llm_test_case: LLMTestCase
+
+    @property
+    def is_tp(self) -> bool:
+        return self.expected_verdict == "BLOCK" and self.actual_verdict == "BLOCK"
+
+    @property
+    def is_fp(self) -> bool:
+        return self.expected_verdict == "PASS" and self.actual_verdict == "BLOCK"
+
+    @property
+    def is_fn(self) -> bool:
+        return self.expected_verdict == "BLOCK" and self.actual_verdict == "PASS"
+
+    @property
+    def vuln_type_correct(self) -> bool | None:
+        """None for non-BLOCK cases. True/False for TP cases only."""
+        if not self.is_tp:
+            return None
+        if self.expected_vulnerability_type is None or self.vulnerability_type is None:
+            return None
+        return self.expected_vulnerability_type.lower() == self.vulnerability_type.lower()
 
 
 @dataclass
@@ -161,6 +183,7 @@ def _run_production_model(cases: list[dict], model: str | None) -> list[CaseResu
             case_id=case_id,
             expected_verdict=case["expected_verdict"],
             actual_verdict=verdict.verdict,
+            expected_vulnerability_type=case.get("expected_vulnerability_type"),
             correct=verdict.verdict == case["expected_verdict"],
             reasoning=verdict.reasoning,
             vulnerability_type=verdict.vulnerability_type,
@@ -198,11 +221,24 @@ def _print_verdict_report(results: list[CaseResult]) -> tuple[float, ConfusionMa
     print(f"  F1          : {_fmt(cm.f1)}")
     print()
 
+    # Vulnerability type accuracy — deterministic, only meaningful on TP cases.
+    tp_with_type = [r for r in results if r.is_tp and r.vuln_type_correct is not None]
+    if tp_with_type:
+        type_correct = sum(1 for r in tp_with_type if r.vuln_type_correct)
+        type_acc = type_correct / len(tp_with_type)
+        print(f"  Vuln type accuracy : {type_acc:.1%}  ({type_correct}/{len(tp_with_type)} TP cases)")
+        type_mismatches = [r for r in tp_with_type if not r.vuln_type_correct]
+        if type_mismatches:
+            for r in type_mismatches:
+                print(f"    [WRONG TYPE] [{r.case_id}]  expected={r.expected_vulnerability_type}  "
+                      f"got={r.vulnerability_type}")
+        print()
+
     failures = [r for r in results if not r.correct]
     if failures:
         print("  FAILURES:")
         for r in failures:
-            label = "FP" if r.actual_verdict == "BLOCK" else "FN"
+            label = "FP" if r.is_fp else "FN"
             print(f"    [{label}] [{r.case_id}]  expected={r.expected_verdict}  got={r.actual_verdict}")
             print(f"           reasoning: {r.reasoning[:120]} …")
     print("=" * 60 + "\n")
@@ -210,24 +246,37 @@ def _print_verdict_report(results: list[CaseResult]) -> tuple[float, ConfusionMa
     return accuracy, cm
 
 
+def _extract_scores(deepeval_results, metric_name: str) -> list[float]:
+    """Pull per-case scores for one metric from a DeepEval results object."""
+    scores: list[float] = []
+    if deepeval_results is None:
+        return scores
+    for tc in deepeval_results.test_results:
+        for metric_data in tc.metrics_data:
+            if metric_data.name == metric_name:
+                scores.append(metric_data.score or 0.0)
+    return scores
+
+
 def _check_gates(
     verdict_accuracy: float,
     cm: ConfusionMatrix,
-    deepeval_results,
+    deepeval_results,        # all-cases results (Hallucination)
+    tp_deepeval_results,     # TP-only results (BlockJustification, VulnClassification)
     verdict_threshold: float,
     precision_threshold: float,
     recall_threshold: float,
     hallucination_threshold: float,
     block_justification_threshold: float,
-    labeled_threat_catch_threshold: float,
+    vuln_classification_threshold: float,
 ) -> bool:
     passed = True
 
+    # ── Deterministic gates ───────────────────────────────────────────────────
     if verdict_accuracy < verdict_threshold:
         logger.error(
             "GATE FAILED — verdict accuracy %.1f%% < threshold %.1f%%",
-            verdict_accuracy * 100,
-            verdict_threshold * 100,
+            verdict_accuracy * 100, verdict_threshold * 100,
         )
         passed = False
     else:
@@ -235,8 +284,8 @@ def _check_gates(
 
     if cm.precision is not None and cm.precision < precision_threshold:
         logger.error(
-            "GATE FAILED — precision %.1f%% < threshold %.1f%% (too many false positives)",
-            cm.precision * 100, precision_threshold * 100,
+            "GATE FAILED — precision %.1f%% < threshold %.1f%% (%d false positives)",
+            cm.precision * 100, precision_threshold * 100, cm.fp,
         )
         passed = False
     elif cm.precision is not None:
@@ -244,27 +293,16 @@ def _check_gates(
 
     if cm.recall is not None and cm.recall < recall_threshold:
         logger.error(
-            "GATE FAILED — recall %.1f%% < threshold %.1f%% (missing real vulnerabilities)",
-            cm.recall * 100, recall_threshold * 100,
+            "GATE FAILED — recall %.1f%% < threshold %.1f%% (%d missed vulnerabilities)",
+            cm.recall * 100, recall_threshold * 100, cm.fn,
         )
         passed = False
     elif cm.recall is not None:
         logger.info("GATE PASSED — recall %.1f%%", cm.recall * 100)
 
-    # DeepEval reports pass/fail per test case per metric; compute mean scores.
-    hallucination_scores: list[float] = []
-    block_justification_scores: list[float] = []
-    labeled_threat_catch_scores: list[float] = []
-
-    for tc in deepeval_results.test_results:
-        for metric_data in tc.metrics_data:
-            if metric_data.name == "Hallucination":
-                hallucination_scores.append(metric_data.score or 0.0)
-            elif metric_data.name == "BlockJustification":
-                block_justification_scores.append(metric_data.score or 0.0)
-            elif metric_data.name == "LabeledThreatCatch":
-                labeled_threat_catch_scores.append(metric_data.score or 0.0)
-
+    # ── LLM judge gates ───────────────────────────────────────────────────────
+    # Hallucination: judge ran on all cases.
+    hallucination_scores = _extract_scores(deepeval_results, "Hallucination")
     if hallucination_scores:
         mean_h = sum(hallucination_scores) / len(hallucination_scores)
         if mean_h < hallucination_threshold:
@@ -273,28 +311,35 @@ def _check_gates(
         else:
             logger.info("GATE PASSED — mean hallucination score %.2f", mean_h)
 
-    if block_justification_scores:
-        mean_b = sum(block_justification_scores) / len(block_justification_scores)
+    # BlockJustification: judge ran only on TP cases; FP cases contribute 0.0.
+    tp_bj_scores = _extract_scores(tp_deepeval_results, "BlockJustification")
+    bj_scores = tp_bj_scores + [0.0] * cm.fp   # FPs scored deterministically
+    if bj_scores:
+        mean_b = sum(bj_scores) / len(bj_scores)
         if mean_b < block_justification_threshold:
             logger.error(
-                "GATE FAILED — mean block-justification score %.2f < threshold %.2f",
-                mean_b, block_justification_threshold,
+                "GATE FAILED — mean block-justification score %.2f < threshold %.2f "
+                "(includes %d FP cases scored 0.0)",
+                mean_b, block_justification_threshold, cm.fp,
             )
             passed = False
         else:
             logger.info("GATE PASSED — mean block-justification score %.2f", mean_b)
 
-    if labeled_threat_catch_scores:
-        mean_l = sum(labeled_threat_catch_scores) / len(labeled_threat_catch_scores)
-        if mean_l < labeled_threat_catch_threshold:
+    # VulnClassification: judge ran only on TP cases; FN cases contribute 0.0.
+    tp_vc_scores = _extract_scores(tp_deepeval_results, "VulnClassification")
+    vc_scores = tp_vc_scores + [0.0] * cm.fn  # FNs scored deterministically
+    if vc_scores:
+        mean_v = sum(vc_scores) / len(vc_scores)
+        if mean_v < vuln_classification_threshold:
             logger.error(
-                "GATE FAILED — mean labeled-threat-catch score %.2f < threshold %.2f "
-                "(model may be missing or weakly detecting labeled threats)",
-                mean_l, labeled_threat_catch_threshold,
+                "GATE FAILED — mean vuln-classification score %.2f < threshold %.2f "
+                "(includes %d FN cases scored 0.0)",
+                mean_v, vuln_classification_threshold, cm.fn,
             )
             passed = False
         else:
-            logger.info("GATE PASSED — mean labeled-threat-catch score %.2f", mean_l)
+            logger.info("GATE PASSED — mean vuln-classification score %.2f", mean_v)
 
     return passed
 
@@ -319,10 +364,10 @@ def main() -> None:
         help="Mean judge score for BlockJustification metric (are BLOCK calls justified?)",
     )
     parser.add_argument(
-        "--labeled-threat-catch-threshold",
+        "--vuln-classification-threshold",
         type=float,
-        default=DEFAULT_LABELED_THREAT_CATCH_THRESHOLD,
-        help="Mean judge score for LabeledThreatCatch (when label is BLOCK, did model catch it?)",
+        default=DEFAULT_VULN_CLASSIFICATION_THRESHOLD,
+        help="Mean judge score for VulnClassification (did model identify the correct vulnerability class?)",
     )
     args = parser.parse_args()
 
@@ -338,30 +383,41 @@ def main() -> None:
     # Step 2: report classification metrics (cheap, deterministic — no judge needed)
     verdict_accuracy, cm = _print_verdict_report(results)
 
-    # Step 3: run LLM-as-a-judge metrics
-    logger.info("Running LLM judge metrics on %d cases …", len(results))
+    # Step 3: run LLM-as-a-judge metrics.
+    # - HallucinationMetric runs on all cases (reasoning quality is universal).
+    # - BlockJustificationMetric and VulnClassificationMetric run only on TP cases
+    #   (label=BLOCK, actual=BLOCK). FP and FN scores are assigned deterministically.
+    tp_results = [r for r in results if r.is_tp]
+    logger.info(
+        "Running LLM judge: %d total cases → %d TP cases sent to judge "
+        "(%d FP and %d FN scored deterministically)",
+        len(results), len(tp_results), cm.fp, cm.fn,
+    )
     deepeval_results = evaluate(
-        test_cases=[r.llm_test_case for r in results],
-        metrics=[
-            HallucinationMetric,
-            BlockJustificationMetric,
-            LabeledThreatCatchMetric,
-        ],
+        test_cases=[r.llm_test_case for r in results],        # Hallucination: all cases
+        metrics=[HallucinationMetric],
         run_async=True,
         show_indicator=True,
     )
+    tp_deepeval_results = evaluate(
+        test_cases=[r.llm_test_case for r in tp_results],    # TP-only: reasoning quality
+        metrics=[BlockJustificationMetric, VulnClassificationMetric],
+        run_async=True,
+        show_indicator=True,
+    ) if tp_results else None
 
     # Step 4: apply quality gates and exit accordingly
     passed = _check_gates(
         verdict_accuracy=verdict_accuracy,
         cm=cm,
         deepeval_results=deepeval_results,
+        tp_deepeval_results=tp_deepeval_results,
         verdict_threshold=args.verdict_accuracy_threshold,
         precision_threshold=args.precision_threshold,
         recall_threshold=args.recall_threshold,
         hallucination_threshold=args.hallucination_threshold,
         block_justification_threshold=args.block_justification_threshold,
-        labeled_threat_catch_threshold=args.labeled_threat_catch_threshold,
+        vuln_classification_threshold=args.vuln_classification_threshold,
     )
 
     sys.exit(0 if passed else 1)

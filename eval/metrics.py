@@ -2,13 +2,22 @@
 Eval – Custom DeepEval Metrics
 Three GEval metrics that use a capable judge model to score SecurityVerdict outputs.
 
-HallucinationMetric       – is the reasoning grounded in the real code? (explanation quality)
-BlockJustificationMetric  – when the model says BLOCK, is that call justified? (over-alert guard)
-LabeledThreatCatchMetric  – when the human label is BLOCK, did the model catch the threat well?
-                            (missed-vuln / weak-detection guard — not formal recall)
+HallucinationMetric       – is the reasoning grounded in the real code?
+BlockJustificationMetric  – for a correct BLOCK (TP), was the exploit reasoning specific?
+VulnClassificationMetric  – for a correct BLOCK (TP), was the vulnerability class right?
 
-All use Chain-of-Thought reasoning before assigning a 0–1 score, which forces
-the judge to justify its decision and reduces positional/length bias.
+IMPORTANT — Judge routing strategy:
+    Only True Positive cases (expected=BLOCK, actual=BLOCK) are sent to the judge.
+    All other outcomes are scored deterministically in eval_runner.py before the
+    judge is called, so the LLM never sees hardcoded conditional branching:
+
+        TN (PASS / PASS)   → neutral, skip judge
+        FP (PASS / BLOCK)  → BlockJustification score = 0.0  (deterministic)
+        FN (BLOCK / PASS)  → VulnClassification score = 0.0  (deterministic)
+        TP (BLOCK / BLOCK) → judge scores both metrics on reasoning quality
+
+This keeps criteria prompts simple (no if/else), reduces judge calls by ~50%,
+and eliminates the known LLM weakness of following strict conditional logic.
 """
 
 from __future__ import annotations
@@ -27,8 +36,7 @@ JUDGE_MODEL = "gpt-4o"
 # ---------------------------------------------------------------------------
 # Hallucination metric
 # ---------------------------------------------------------------------------
-# Detects when the model's reasoning invents variables, function calls, or
-# logic that does not appear in the actual raw_source provided as context.
+# Runs on ALL cases — reasoning quality is independent of verdict correctness.
 #
 # LLMTestCaseParams mapping:
 #   INPUT          → the full prompt sent to the production model
@@ -57,88 +65,65 @@ HallucinationMetric = GEval(
 )
 
 # ---------------------------------------------------------------------------
-# Block justification metric  (false-positive guard)
+# Block justification metric  — TP cases only
 # ---------------------------------------------------------------------------
-# When the model predicts BLOCK, was that call correct and well-reasoned?
-# Uses EXPECTED_OUTPUT (ground truth label) so confirmed false positives
-# (BLOCK on a PASS-labeled case) are always penalised, even when the
-# reasoning sounds convincing.
-#
-# Scoring guidance:
-#   • ACTUAL_OUTPUT is PASS → neutral 0.7 (nothing to justify).
-#   • ACTUAL_OUTPUT is BLOCK, EXPECTED_OUTPUT is BLOCK → score by quality
-#     of the exploit reasoning (1.0 specific, 0.5 vague).
-#   • ACTUAL_OUTPUT is BLOCK, EXPECTED_OUTPUT is PASS → score 0.0 regardless
-#     of how plausible the reasoning sounds — this is a confirmed false positive.
+# Evaluates whether the exploit reasoning for a confirmed BLOCK is specific
+# and correct. FP cases (model BLOCKed a safe function) receive score 0.0
+# deterministically in eval_runner.py and are never sent here.
 #
 # LLMTestCaseParams mapping:
-#   INPUT           → the full prompt (includes raw_source and changed_lines)
-#   ACTUAL_OUTPUT   → SecurityVerdict.reasoning + verdict label
-#   EXPECTED_OUTPUT → human-verified ground truth ("BLOCK" or "PASS")
+#   INPUT          → the full prompt (includes raw_source and changed_lines)
+#   ACTUAL_OUTPUT  → SecurityVerdict.reasoning + verdict label
 
 BlockJustificationMetric = GEval(
     name="BlockJustification",
     model=JUDGE_MODEL,
     criteria=(
-        "Evaluate whether a BLOCK verdict from the model was correct and well-reasoned. "
-        "The EXPECTED OUTPUT is the human-verified ground truth ('BLOCK' or 'PASS'). "
-        "If the ACTUAL OUTPUT verdict is PASS, assign 0.7 — no BLOCK to justify. "
-        "If the ACTUAL OUTPUT verdict is BLOCK and the EXPECTED OUTPUT is PASS, "
-        "score 0.0 — this is a confirmed false positive regardless of how plausible "
-        "the reasoning sounds. "
-        "If the ACTUAL OUTPUT verdict is BLOCK and the EXPECTED OUTPUT is BLOCK, "
-        "evaluate the quality of the reasoning: score 1.0 if the reasoning identifies "
-        "a concrete, exploitable attack path (e.g. user-controlled data reaches a "
-        "dangerous sink without sanitisation); score 0.5 if the reasoning is plausible "
-        "but vague or missing a clear exploit path; score 0.2 if the reasoning is "
-        "misleading or references the wrong vulnerability class."
+        "You are reviewing the reasoning for a BLOCK verdict that was confirmed "
+        "correct by a human expert. Evaluate the quality of the exploit description: "
+        "Score 1.0 if the reasoning identifies a concrete, exploitable attack path "
+        "(e.g. user-controlled data reaches a dangerous sink without sanitisation, "
+        "with the specific variable and sink named). "
+        "Score 0.5 if the reasoning correctly identifies the vulnerability type but "
+        "is vague about the specific code path or attack vector. "
+        "Score 0.2 if the reasoning references the wrong vulnerability class or "
+        "describes an attack path that does not match the actual code."
     ),
     evaluation_params=[
         LLMTestCaseParams.INPUT,
         LLMTestCaseParams.ACTUAL_OUTPUT,
-        LLMTestCaseParams.EXPECTED_OUTPUT,
     ],
     threshold=0.6,
 )
 
 # ---------------------------------------------------------------------------
-# Labeled-threat-catch metric  (missed-vuln / weak-response guard)
+# Vulnerability classification metric  — TP cases only
 # ---------------------------------------------------------------------------
-# Uses human ground truth (EXPECTED_OUTPUT). When the label is BLOCK, did the
-# model respond appropriately? This is not formal sensitivity/recall; it adds
-# a graded judge on top of label agreement.
-#
-# Scoring guidance:
-#   • EXPECTED_OUTPUT is PASS → score 0.8 (neutral; threat label not applicable).
-#   • EXPECTED_OUTPUT is BLOCK and ACTUAL_OUTPUT contains BLOCK → 1.0 or 0.6
-#     by quality of reasoning vs. the real issue.
-#   • EXPECTED_OUTPUT is BLOCK and ACTUAL_OUTPUT contains PASS → 0.0 (missed threat).
+# Evaluates whether the model correctly identified the vulnerability CLASS for
+# a confirmed BLOCK. FN cases (model missed a real vulnerability) receive
+# score 0.0 deterministically in eval_runner.py and are never sent here.
 #
 # LLMTestCaseParams mapping:
 #   INPUT           → the full prompt (includes raw_source and changed_lines)
-#   ACTUAL_OUTPUT   → SecurityVerdict.reasoning + verdict label
-#   EXPECTED_OUTPUT → human verdict ("BLOCK" or "PASS")
+#   ACTUAL_OUTPUT   → SecurityVerdict.reasoning + verdict label + vulnerability type
 
-LabeledThreatCatchMetric = GEval(
-    name="LabeledThreatCatch",
+VulnClassificationMetric = GEval(
+    name="VulnClassification",
     model=JUDGE_MODEL,
     criteria=(
-        "You are evaluating whether a security model correctly responded to a "
-        "human-verified label. The EXPECTED OUTPUT is the ground truth verdict "
-        "('BLOCK' means experts judged a real vulnerability; 'PASS' means safe). "
-        "The ACTUAL OUTPUT is what the model produced. "
-        "If the EXPECTED OUTPUT is 'PASS', assign 0.8 — this check does not apply. "
-        "If the EXPECTED OUTPUT is 'BLOCK' and the ACTUAL OUTPUT contains 'BLOCK', "
-        "score 1.0 if the reasoning correctly identifies the vulnerability class "
-        "and relevant code path, or 0.6 if it BLOCKs for a vague or partially "
-        "correct reason. "
-        "If the EXPECTED OUTPUT is 'BLOCK' and the ACTUAL OUTPUT contains 'PASS', "
-        "score 0.0 — the model failed to flag a confirmed vulnerability."
+        "You are reviewing a confirmed BLOCK verdict. Evaluate whether the model "
+        "correctly identified the vulnerability class and the relevant code path. "
+        "Score 1.0 if the reasoning names the correct attack type (e.g. SQL Injection, "
+        "Path Traversal, Command Injection) and correctly traces the data flow from "
+        "the user-controlled source to the dangerous sink. "
+        "Score 0.6 if the vulnerability class is correct but the data flow description "
+        "is incomplete or partially wrong. "
+        "Score 0.2 if the vulnerability class is wrong or the described attack path "
+        "does not match the actual code (correct verdict, wrong reason)."
     ),
     evaluation_params=[
         LLMTestCaseParams.INPUT,
         LLMTestCaseParams.ACTUAL_OUTPUT,
-        LLMTestCaseParams.EXPECTED_OUTPUT,
     ],
     threshold=0.6,
 )
