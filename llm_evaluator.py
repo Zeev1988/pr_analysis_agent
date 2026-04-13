@@ -81,8 +81,14 @@ analysis pipeline. Your job is to decide whether a changed Python function \
 introduces an exploitable security vulnerability.
 
 Rules:
-- Focus only on the CHANGED lines listed in the metadata, but consider the full \
-  function for context (e.g. to trace untrusted data into a dangerous sink).
+- For ADDED lines: trace whether untrusted input reaches a dangerous sink \
+  (e.g. raw SQL execution, subprocess call, eval) without sanitisation.
+- For REMOVED lines: check whether the deletion removes a sanitizer, validator, \
+  or access-control check that previously protected a dangerous sink. Removing \
+  protective code is a vulnerability even if no new code was added.
+- Removing a sink (e.g. deleting a cursor.execute call) is NOT a vulnerability.
+- Consider the full function source for context — the dangerous pattern may span \
+  lines that were not directly modified.
 - Return BLOCK only when you are confident an attacker could exploit the code \
   as written; return PASS for theoretical risks that require additional \
   preconditions outside this function.
@@ -90,15 +96,20 @@ Rules:
 
 
 def _build_user_message(s: FunctionSlice) -> str:
-    changed_str = ", ".join(str(ln) for ln in s.changed_lines)
     sink_flag = "YES" if s.has_sink else "NO"
-    return (
-        f"File: {s.filename}\n"
-        f"Function: {s.function_name}({', '.join(s.params)})\n"
-        f"Lines {s.start_line}–{s.end_line} | Changed lines in diff: [{changed_str}]\n"
-        f"Known dangerous sink present: {sink_flag}\n\n"
-        f"```python\n{s.raw_source}\n```"
-    )
+    parts = [
+        f"File: {s.filename}",
+        f"Function: {s.function_name}({', '.join(s.params)})",
+        f"Known dangerous sink present in new code: {sink_flag}",
+    ]
+    if s.changed_lines:
+        parts.append(f"Lines added in this PR (new-file numbers): {s.changed_lines}")
+    if s.deleted_lines:
+        parts.append(f"Lines removed in this PR (old-file numbers): {s.deleted_lines}")
+    if s.old_raw_source is not None:
+        parts.append(f"\nBefore (pre-merge):\n```python\n{s.old_raw_source}\n```")
+    parts.append(f"\nAfter (post-merge):\n```python\n{s.raw_source}\n```")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
